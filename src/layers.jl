@@ -1,5 +1,6 @@
 module Layers
 
+using FastDEQ
 using Flux
 using Flux: glorot_uniform, normalise, @functor#, destructure
 using Zygote: @adjoint, @nograd
@@ -192,40 +193,29 @@ end
 (m::AGNPool)(lapl::Matrix{<:Real}, out_mat::Matrix{<:Real}) = m(out_mat)
 (m::AGNPool)(t::Tuple{Matrix{R1},Matrix{R2}}) where {R1<:Real,R2<:Real} = m(t[2])
 
-# DEQ-style model where we treat the convolution as a SteadyStateProblem
-struct AGNConvDEQ{T,F}
-    conv::AGNConv{T,F}
-end
 
-function AGNConvDEQ(ch::Pair{<:Integer,<:Integer}, σ=softplus; initW=glorot_uniform, initb=glorot_uniform, T::DataType=Float32, bias::Bool=true)
-    conv = AGNConv(ch, σ; initW=initW, initb=initb, T=T)
-    AGNConvDEQ(conv)
-end
+# Specialize DEQ from FastDEQ for AtomicGraphNets
+function (deq::DeepEquilibriumNetwork)(fa::FeaturizedAtoms, p = deq.p)
+    lapl, feat = fa.atoms.laplacian, fa.encoded_features
+    u0 = zero(feat)
 
-@functor AGNConvDEQ
-
-# set up SteadyStateProblem where the derivative is the convolution operation
-# (we want the "fixed point" of the convolution)
-# need it in the form f(u,p,t) (but t doesn't matter)
-# u is the features, p is the parameters of conv
-# re(p) reconstructs the convolution with new parameters p
-function (l::AGNConvDEQ)(fa::FeaturizedAtoms)
-    p,re = Flux.destructure(l.conv)
-    # do one convolution to get initial guess
-    guess = l.conv(fa)[2]
-
-    f = function (dfeat,feat,p,t)
-        input = fa.atoms.laplacian, reshape(feat,size(guess))
-        output = re(p)(input)
-        dfeat .= vec(output[2]) .- vec(input[2])
+    function dudt(u, _p, t)
+        deq.stats.nfe += 1
+        ufeat = reshape(u, size(u0))
+        return deq.re(_p)(lapl, ufeat, feat)[2] .- ufeat
     end
 
-    prob = SteadyStateProblem{true}(f, vec(guess), p)
-    #return solve(prob, DynamicSS(Tsit5())).u
-    alg = SSRootfind()
-    #alg = SSRootfind(nlsolve = (f,u0,abstol) -> (res=SteadyStateDiffEq.NLsolve.nlsolve(f,u0,autodiff=:forward,method=:anderson,iterations=Int(1e6),ftol=abstol);res.zero))
-    out_mat = reshape(solve(prob, alg, sensealg = SteadyStateAdjoint(autodiff = false, autojacvec = ZygoteVJP())).u,size(guess))
-    return fa.atoms.laplacian, out_mat
+    ssprob = SteadyStateProblem(dudt, u0, p)
+    sol = solve(
+        ssprob,
+        deq.args...;
+        u0 = u0,
+        sensealg = deq.sensealg,
+        deq.kwargs...,
+    )
+    deq.stats.nfe += 1
+
+    return deq.re(p)(lapl, sol.u, feat)
 end
 
 end
