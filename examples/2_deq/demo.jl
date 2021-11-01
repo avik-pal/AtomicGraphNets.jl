@@ -21,7 +21,7 @@ end
 model = DeepEquilibriumNetwork(
     InnerBlock(AGNConv(61 => 61), AGNConv(61 => 61)),
     DynamicSS(Tsit5(); abstol = 1e-3, reltol = 1e-3),
-    maxiters = 50,
+    maxiters = 100,
 )
 
 model(inputs[1])
